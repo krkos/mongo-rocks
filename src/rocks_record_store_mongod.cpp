@@ -99,7 +99,7 @@ namespace mongo {
                     RocksRecordStore* rs =
                         checked_cast<RocksRecordStore*>(collection->getRecordStore());
                     WriteUnitOfWork wuow(opCtx.get());
-                    stdx::lock_guard<boost::timed_mutex> lock(rs->cappedDeleterMutex());
+                    stdx::lock_guard<stdx::timed_mutex> lock(rs->cappedDeleterMutex());
                     int64_t removed = rs->cappedDeleteAsNeeded_inlock(opCtx.get(), RecordId::max());
                     wuow.commit();
                     return removed;
@@ -145,9 +145,9 @@ namespace mongo {
             return false;
         }
 
-        if (storageGlobalParams.repair) {
+        if (storageGlobalParams.repair || storageGlobalParams.readOnly) {
             LOG(1) << "not starting RocksRecordStoreThread for " << ns
-                   << " because we are in repair";
+                   << " because we are either in repair or read-only mode";
             return false;
         }
 

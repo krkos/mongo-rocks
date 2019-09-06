@@ -35,9 +35,6 @@
 #include <vector>
 #include <unordered_map>
 
-#include <boost/scoped_ptr.hpp>
-#include <boost/shared_ptr.hpp>
-
 #include <rocksdb/slice.h>
 #include <rocksdb/write_batch.h>
 #include <rocksdb/utilities/write_batch_with_index.h>
@@ -46,6 +43,7 @@
 #include "mongo/base/owned_pointer_vector.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/storage/recovery_unit.h"
+#include "mongo/util/timer.h"
 
 #include "rocks_compaction_scheduler.h"
 #include "rocks_transaction.h"
@@ -95,18 +93,16 @@ namespace mongo {
 
         virtual void abandonSnapshot();
 
-        Status setReadFromMajorityCommittedSnapshot() final;
-        bool isReadingFromMajorityCommittedSnapshot() const final {
-            return _readFromMajorityCommittedSnapshot;
-        }
+        Status obtainMajorityCommittedSnapshot() final;
 
-        boost::optional<SnapshotName> getMajorityCommittedSnapshot() const final;
+        boost::optional<Timestamp> getPointInTimeReadTimestamp() const final;
 
         virtual void* writingPtr(void* data, size_t len) { invariant(!"don't call writingPtr"); }
 
         virtual void registerChange(Change* change);
 
-        virtual void setRollbackWritesDisabled() {}
+        virtual void setRollbackWritesDisabled() override {}
+        virtual void setOrderedCommit(bool orderedCommit) override {};
 
         virtual SnapshotId getSnapshotId() const;
 
@@ -134,6 +130,8 @@ namespace mongo {
                               std::atomic<long long>* counter, long long delta);
 
         long long getDeltaCounter(const rocksdb::Slice& counterKey);
+
+        void resetDeltaCounters();
 
         void setOplogReadTill(const RecordId& loc);
         RecordId getOplogReadTill() const { return _oplogReadTill; }
@@ -189,6 +187,7 @@ namespace mongo {
         // it is consumed by getPreparedSnapshot()
         const rocksdb::Snapshot* _preparedSnapshot;  // owned
 
+        std::unique_ptr<Timer> _timer;
         CounterMap _deltaCounters;
 
         typedef OwnedPointerVector<Change> Changes;

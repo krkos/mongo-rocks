@@ -38,8 +38,6 @@
 
 #include <rocksdb/options.h>
 
-#include <boost/thread/mutex.hpp>
-
 #include "mongo/db/storage/capped_callback.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/platform/atomic_word.h"
@@ -58,6 +56,7 @@ namespace mongo {
 
     class RocksCounterManager;
     class RocksDurabilityManager;
+    class RocksCompactionScheduler;
     class RocksRecoveryUnit;
     class RocksOplogKeyTracker;
     class RocksRecordStore;
@@ -106,7 +105,9 @@ namespace mongo {
     public:
         RocksRecordStore(StringData ns, StringData id, rocksdb::DB* db,
                          RocksCounterManager* counterManager,
-                         RocksDurabilityManager* durabilityManager, std::string prefix,
+                         RocksDurabilityManager* durabilityManager,
+                         RocksCompactionScheduler* compactionScheduler,
+                         std::string prefix,
                          bool isCapped = false, int64_t cappedMaxSize = -1,
                          int64_t cappedMaxDocs = -1, CappedCallback* cappedDeleteCallback = NULL);
 
@@ -125,6 +126,8 @@ namespace mongo {
                                      BSONObjBuilder* extraInfo = NULL,
                                      int infoLevel = 0 ) const;
 
+        virtual bool isInRecordIdOrder() const override { return true; }
+
         // CRUD related
 
         virtual RecordData dataFor( OperationContext* opCtx, const RecordId& loc ) const;
@@ -138,10 +141,12 @@ namespace mongo {
         virtual StatusWith<RecordId> insertRecord( OperationContext* opCtx,
                                                   const char* data,
                                                   int len,
+                                                  Timestamp timestamp,
                                                   bool enforceQuota );
 
         virtual Status insertRecordsWithDocWriter(OperationContext* opCtx,
                                                   const DocWriter* const* docs,
+                                                  const Timestamp* timestamps,
                                                   size_t nDocs,
                                                   RecordId* idsOut);
 
@@ -183,12 +188,15 @@ namespace mongo {
         virtual boost::optional<RecordId> oplogStartHack(OperationContext* opCtx,
                                                          const RecordId& startingPosition) const;
 
-        virtual Status oplogDiskLocRegister(OperationContext* opCtx, const Timestamp& opTime);
+        virtual Status oplogDiskLocRegister(OperationContext* opCtx, const Timestamp& opTime,
+                                            bool orderedCommit);
 
         void waitForAllEarlierOplogWritesToBeVisible(OperationContext* opCtx) const override;
 
         virtual void updateStatsAfterRepair(OperationContext* opCtx, long long numRecords,
                                             long long dataSize);
+
+        virtual Status updateCappedSize(OperationContext* opCtx, long long cappedSize) override final;
 
         void setCappedCallback(CappedCallback* cb) {
           stdx::lock_guard<stdx::mutex> lk(_cappedCallbackMutex);
@@ -200,7 +208,7 @@ namespace mongo {
 
         int64_t cappedDeleteAsNeeded(OperationContext* opCtx, const RecordId& justInserted);
         int64_t cappedDeleteAsNeeded_inlock(OperationContext* opCtx, const RecordId& justInserted);
-        boost::timed_mutex& cappedDeleterMutex() { return _cappedDeleterMutex; }
+        stdx::timed_mutex& cappedDeleterMutex() { return _cappedDeleterMutex; }
 
         static rocksdb::Comparator* newRocksCollectionComparator();
 
@@ -215,7 +223,7 @@ namespace mongo {
         public:
             Cursor(OperationContext* opCtx, rocksdb::DB* db, std::string prefix,
                    std::shared_ptr<CappedVisibilityManager> cappedVisibilityManager,
-                   bool forward, bool _isCapped);
+                   bool forward, bool _isCapped, RecordId startIterator);
 
             boost::optional<Record> next() final;
             boost::optional<Record> seekExact(const RecordId& id) final;
@@ -268,16 +276,17 @@ namespace mongo {
 
         rocksdb::DB* _db;                      // not owned
         RocksCounterManager* _counterManager;  // not owned
+        RocksCompactionScheduler* _compactionScheduler;  // not owned
         std::string _prefix;
 
         const bool _isCapped;
-        const int64_t _cappedMaxSize;
-        const int64_t _cappedMaxSizeSlack;  // when to start applying backpressure
+        int64_t _cappedMaxSize;
+        int64_t _cappedMaxSizeSlack;  // when to start applying backpressure
         const int64_t _cappedMaxDocs;
         CappedCallback* _cappedCallback;
         stdx::mutex _cappedCallbackMutex;  // guards _cappedCallback.
 
-        mutable boost::timed_mutex _cappedDeleterMutex;  // see comment in ::cappedDeleteAsNeeded
+        mutable stdx::timed_mutex _cappedDeleterMutex;  // see comment in ::cappedDeleteAsNeeded
         int _cappedDeleteCheckCount;      // see comment in ::cappedDeleteAsNeeded
 
         const bool _isOplog;
